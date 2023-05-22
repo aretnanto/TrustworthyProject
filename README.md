@@ -2,13 +2,13 @@
 
 DATA 27751
 
-Collaborators:
+## Collaborators:
 
-Aditya
+- Aditya
 
-Aim
+- Aim
 
-Richard
+- Richard
 
 
-Toxcicity Classification with Civil Comments Dataset
+## Toxcicity Classification with Civil Comments Dataset

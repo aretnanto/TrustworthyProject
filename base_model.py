@@ -14,6 +14,8 @@ from torchtext.data import get_tokenizer
 from torchtext.vocab import GloVe
 import re
 from torch.utils.data import Dataset, DataLoader
+from torch.optim.lr_scheduler import ReduceLROnPlateau
+
 
 def tokenize(text, max_length):
     tokenizer = get_tokenizer('basic_english')
@@ -66,7 +68,7 @@ glove.stoi[padding_token] = len(glove.itos) - 1
 glove.vectors = torch.cat((glove.vectors, padding_vector.unsqueeze(0)), dim=0) 
 
 ##Load Data
-path = os.path.join('/content/drive/MyDrive/TrustworthyML/data')
+path = os.path.join('data')
 train = pd.read_csv(os.path.join(path, 'train.csv'))
 label = train['target'].apply(lambda x: 0 if x <= 0.5 else 1)
 data = train['comment_text'].apply(lambda x: tokenize(x, length))
@@ -100,10 +102,14 @@ test_loader = DataLoader(test_data, batch_size=32, shuffle=False)
 
 
 #Train Model 
+negative_samples = (label == 0).sum().float()
+positive_samples = (label == 1).sum().float()
+pos_weight = negative_samples / positive_samples
 model = ToxicClassifier(len(glove), token_dim, glove.vectors.to(device))
 model = model.to(device)
-criterion = nn.BCEWithLogitsLoss()
-optimizer = optim.Adam(model.parameters(), lr = 1e-3)
+criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+optimizer = optim.Adam(model.parameters(), lr = 1e-1)
+scheduler = ReduceLROnPlateau(optimizer, 'min', factor=0.1, patience = 10)
 num_epochs = 100
 for epoch in range(0, num_epochs):
   train_loss = 0.0
@@ -125,6 +131,7 @@ for epoch in range(0, num_epochs):
       pbar.set_postfix(MSE=loss.item())
       train_loss += loss
   train_loss /= len(train_loader.dataset)
+  scheduler.step(train_loss)
   train_acc = train_correct / train_total
   print(f"Epoch {epoch+1}/{num_epochs}, Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}")  
   

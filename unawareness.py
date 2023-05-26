@@ -1,7 +1,7 @@
+from torchtext.vocab import GloVe
 import torch
 import torchvision.transforms as transforms
 from torch.utils.data import DataLoader
-from torchvision.models import resnet18
 import torch.nn as nn
 from tqdm import tqdm
 import torch.optim as optim
@@ -14,29 +14,10 @@ from torchtext.data import get_tokenizer
 from torchtext.vocab import GloVe
 import re
 from torch.utils.data import Dataset, DataLoader
-
-def tokenize(text, max_length):
-    tokenizer = get_tokenizer('basic_english')
-    text = text.lower()
-    text = re.sub(r"([.!?,'*])", r"", text)
-    text = re.sub(r"([-])", r" ", text)
-    tokens = tokenizer(text)
-    if len(tokens) < max_length:
-      tokens.extend(['<PAD>']*(max_length - len(tokens)))
-    tokens = tokens[:max_length]
-    tokens = [glove.stoi.get(token, len(glove.stoi) - 1) for token in tokens]
-    return tokens
-
-class CustomDataset(Dataset):
-    def __init__(self, tensor1, tensor2):
-        self.tensor1 = tensor1
-        self.tensor2 = tensor2
-
-    def __len__(self):
-        return len(self.tensor1)
-
-    def __getitem__(self, index):
-        return self.tensor1[index], self.tensor2[index]
+from torch.optim.lr_scheduler import ReduceLROnPlateau
+from wilds import get_dataset
+from wilds.common.data_loaders import get_train_loader
+import torchvision.transforms as transforms
 
 class ToxicClassifier(nn.Module):
     def __init__(self, vocab_size, embedding_dim, embeddings_vectors, hidden_dim = 32, output_dim = 1):
@@ -49,62 +30,45 @@ class ToxicClassifier(nn.Module):
         embedded = self.embedding(text)
         _, embedded = self.rnn(embedded)
         return self.output(embedded[-1])
-        
-#init variables
+
+def tokenize(text, max_length = 100):
+    tokenizer = get_tokenizer('basic_english')
+    text = text.lower()
+    text = re.sub(r"([.!?,'*])", r"", text)
+    text = re.sub(r"([-])", r" ", text)
+    tokens = tokenizer(text)
+    if len(tokens) < max_length:
+      tokens.extend(['<PAD>']*(max_length - len(tokens)))
+    tokens = tokens[:max_length]
+    tokens = [glove.stoi.get(token, len(glove.stoi) - 1) for token in tokens]
+    tokens = np.array(tokens, dtype=np.int64)
+    return tokens
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 batch_size = 32
 token_dim = 50
 length = 100
 
+dataset = get_dataset(dataset="civilcomments", download=True)
+train_data = dataset.get_subset(
+    "train")
+train_loader = get_train_loader("standard", train_data, batch_size=32)
+test_data = dataset.get_subset(
+    "val")
+test_loader = get_train_loader("standard", train_data, batch_size=32)
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-#Handle Glove
-glove = GloVe(name='6B', dim=token_dim)
-padding_vector = torch.zeros(token_dim)
-padding_token = '<PAD>'
-glove.itos.append(padding_token)  
-glove.stoi[padding_token] = len(glove.itos) - 1 
-glove.vectors = torch.cat((glove.vectors, padding_vector.unsqueeze(0)), dim=0) 
+from wilds.common.grouper import CombinatorialGrouper
+unawareness = CombinatorialGrouper(dataset, ['identity_any'])
 
-##Load Data
-path = os.path.join('data')
-train = pd.read_csv(os.path.join(path, 'train.csv'))
-train = train[train['identity_annotator_count'] == 0] #fairness through unawareness
-label = train['target'].apply(lambda x: 0 if x <= 0.5 else 1)
-data = train['comment_text'].apply(lambda x: tokenize(x, length))
-data = data.values
-data = np.array(list(data), dtype=np.int64)
-data = torch.Tensor(data).long()
-data = data.to(device)
-label = label.values
-label = label.reshape(-1,1)
-label = torch.Tensor(label)
-label = label.to(device)
-train_data = CustomDataset(data, label)
-train_loader = DataLoader(train_data, batch_size=32, shuffle=True)
+train_loader = get_train_loader(
+    "group", train_data, grouper=unawareness, n_groups_per_batch=1, batch_size=32
+)
 
-#Load Test Data
-test = pd.read_csv(os.path.join(path, 'test_public_expanded.csv'))
-test2 = pd.read_csv(os.path.join(path, 'test_private_expanded.csv'))
-all_test = pd.concat([test, test2], axis = 0)
-test_label = all_test['toxicity'].apply(lambda x: 0 if x <= 0.5 else 1)
-test_data = all_test['comment_text'].apply(lambda x: tokenize(x, length))
-test_data = test_data.values
-test_data = np.array(list(test_data), dtype=np.int64)
-test_data = torch.Tensor(test_data).long()
-test_data = test_data.to(device)
-test_label = test_label.values
-test_label = test_label.reshape(-1,1)
-test_label = torch.Tensor(test_label)
-test_label = test_label.to(device)
-test_data = CustomDataset(test_data, test_label)
-test_loader = DataLoader(test_data, batch_size=32, shuffle=False)
-
-
-#Train Model 
 model = ToxicClassifier(len(glove), token_dim, glove.vectors.to(device))
 model = model.to(device)
 criterion = nn.BCEWithLogitsLoss()
-optimizer = optim.Adam(model.parameters(), lr = 1e-3)
+optimizer = optim.Adam(model.parameters(), lr = 1e-1)
+scheduler = ReduceLROnPlateau(optimizer, 'min', factor=0.1, patience = 10)
 num_epochs = 100
 for epoch in range(0, num_epochs):
   train_loss = 0.0
@@ -112,32 +76,40 @@ for epoch in range(0, num_epochs):
   train_total = 0
   model.train()
   pbar = tqdm(train_loader)
-  for _, batch in enumerate(pbar, 0):
-      input = batch[0]
-      label = batch[1]
-      output = model(input)
-      loss = criterion(output, label)
-      optimizer.zero_grad()
-      loss.backward()
-      optimizer.step()
-      predicted_labels = (torch.sigmoid(output) >= 0.5).float()
-      train_correct += (predicted_labels == label).sum().item()
-      train_total += len(label)
-      pbar.set_postfix(MSE=loss.item())
-      train_loss += loss
+  for _ , cur_train in enumerate(pbar):
+      input, label, metadata = cur_train
+      if metadata[:,8].sum() == 0:
+        input = tuple(map(tokenize, input))
+        input = torch.Tensor(input).long().to(device)
+        label = label.to(device)
+        output = model(input).reshape(-1)
+        loss = criterion(output, label.float())
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        predicted_labels = (torch.sigmoid(output) >= 0.5).float()
+        train_correct += (predicted_labels == label).sum().item()
+        train_total += len(label)
+        pbar.set_postfix(MSE=loss.item())
+        train_loss += loss
   train_loss /= len(train_loader.dataset)
+  scheduler.step(train_loss)
   train_acc = train_correct / train_total
   print(f"Epoch {epoch+1}/{num_epochs}, Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}")  
-  
+
   test_loss = 0.0
   test_correct = 0
   test_total = 0
   pbar = tqdm(test_loader)
+  model.eval()
   with torch.no_grad():
       for i, data in enumerate(pbar, 0):
-          input = batch[0]
-          label = batch[1]
-          loss = criterion(output, label)
+          input, label, groupings = cur_train
+          input = tuple(map(tokenize, input))
+          input = torch.Tensor(input).long().to(device)
+          label = label.to(device)
+          output = model(input).reshape(-1)
+          loss = criterion(output, label.float())
           predicted_labels = (torch.sigmoid(output) >= 0.5).float()
           test_total += len(label)
           test_correct += (predicted_labels == label).sum().item()

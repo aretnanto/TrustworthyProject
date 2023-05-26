@@ -121,3 +121,29 @@ for epoch in range(0, num_epochs):
   test_loss /= len(test_loader.dataset)
   test_acc = test_correct / test_total
   print(f"Epoch {epoch+1}/{num_epochs}, Test Loss: {test_loss:.4f}, Test Acc: {test_acc:.4f}")
+
+from wilds.common.data_loaders import get_eval_loader
+
+# Get the test set
+test_data = dataset.get_subset(
+    "test",
+)
+
+# Prepare the data loader
+test_loader = get_eval_loader("standard", test_data, batch_size=32)
+trues = []
+preds = []
+metadatas = []
+for input, true, metadata in test_loader:
+    with torch.no_grad():
+      input = tuple(map(tokenize, input))
+      input = torch.Tensor(input).long().to(device)
+      output = model(input)
+      output = (torch.sigmoid(output) >= 0.5).long().reshape(-1)
+      trues.append(true.to('cpu'))
+      preds.append(output.to('cpu'))
+      metadatas.append(metadata.to('cpu'))
+all_preds = torch.cat(preds, dim = 0)
+all_trues = torch.cat(trues, dim = 0)
+all_metas = torch.cat(metadatas, dim = 0)
+print(dataset.eval(all_preds, all_trues, all_metas))

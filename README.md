@@ -12,4 +12,8 @@ DATA 27751
 
 
 ## Toxcicity Classification with Civil Comments Dataset
-
+Analysis using 
+- Emperical Risk Minimization
+- Fairness Through Unawareness
+- Invariant Risk Minimization
+- Distributional Robust Optimization
